@@ -1,0 +1,19 @@
+version: "3.9"
+
+services:
+  mcp-oauth-server:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      - BASE_URL=http://localhost:8080
+      - SECRET_KEY=dev-secret-change-in-production
+      - DATABASE_URL=sqlite+aiosqlite:///./mcp_oauth.db
+      - REQUIRE_PKCE=true
+    volumes:
+      - ./data:/app/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
