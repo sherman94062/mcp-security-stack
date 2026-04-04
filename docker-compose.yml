@@ -1,19 +1,226 @@
 version: "3.9"
 
+# ── MCP Security Stack ────────────────────────────────────────────────────────
+#
+# Spins up all five servers with correct startup ordering,
+# shared networking, persistent data volumes, and health checks.
+#
+# Quick start:
+#   cp .env.example .env        # Edit keys before starting
+#   docker compose up --build
+#
+# Individual server:
+#   docker compose up mcp-oauth-server
+#
+# Run tests against the live stack:
+#   docker compose --profile test up --build --abort-on-container-exit
+# ─────────────────────────────────────────────────────────────────────────────
+
+x-common-env: &common-env
+  # Shared service URLs — each server uses these to talk to the others
+  OAUTH_SERVER_URL:  http://mcp-oauth-server:8080
+  AUDIT_SERVER_URL:  http://mcp-audit-server:8081
+  GATEWAY_BASE_URL:  http://mcp-gateway:8082
+  SECRETS_BASE_URL:  http://mcp-secrets-server:8083
+  PII_BASE_URL:      http://mcp-pii-filter:8084
+
+x-common-build: &common-build
+  build:
+    context: .
+    dockerfile: Dockerfile
+  restart: unless-stopped
+  networks:
+    - mcp-net
+
 services:
+
+  # ── 1. OAuth Server ────────────────────────────────────────────────────────
   mcp-oauth-server:
-    build: .
+    <<: *common-build
+    container_name: mcp-oauth-server
     ports:
       - "8080:8080"
+    command: uvicorn mcp_oauth_server.main:app --host 0.0.0.0 --port 8080
     environment:
-      - BASE_URL=http://localhost:8080
-      - SECRET_KEY=dev-secret-change-in-production
-      - DATABASE_URL=sqlite+aiosqlite:///./mcp_oauth.db
-      - REQUIRE_PKCE=true
+      <<: *common-env
+      HOST:                    "0.0.0.0"
+      PORT:                    "8080"
+      BASE_URL:                "http://localhost:8080"
+      SECRET_KEY:              "${SECRET_KEY:-dev-secret-change-in-production}"
+      JWT_ALGORITHM:           "HS256"
+      ACCESS_TOKEN_EXPIRE_MINUTES: "60"
+      REFRESH_TOKEN_EXPIRE_DAYS:   "30"
+      AUTH_CODE_EXPIRE_MINUTES:    "10"
+      REQUIRE_PKCE:            "true"
+      DATABASE_URL:            "sqlite+aiosqlite:////app/data/mcp_oauth.db"
     volumes:
-      - ./data:/app/data
+      - oauth-data:/app/data
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
+      test: ["CMD", "curl", "-sf", "http://localhost:8080/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ── 2. Audit Server ────────────────────────────────────────────────────────
+  mcp-audit-server:
+    <<: *common-build
+    container_name: mcp-audit-server
+    ports:
+      - "8081:8081"
+    command: uvicorn mcp_audit_server.main:app --host 0.0.0.0 --port 8081
+    environment:
+      <<: *common-env
+      HOST:                   "0.0.0.0"
+      AUDIT_PORT:             "8081"
+      BASE_URL:               "http://localhost:8081"
+      DATABASE_URL:           "sqlite+aiosqlite:////app/data/mcp_audit.db"
+      AUDIT_INGEST_API_KEY:   "${AUDIT_INGEST_API_KEY:-dev-audit-key-change-in-production}"
+      AUDIT_READ_API_KEY:     "${AUDIT_READ_API_KEY:-dev-read-key-change-in-production}"
+      SIEM_WEBHOOK_URL:       "${SIEM_WEBHOOK_URL:-}"
+      SIEM_WEBHOOK_API_KEY:   "${SIEM_WEBHOOK_API_KEY:-}"
+      RETENTION_DAYS:         "365"
+    volumes:
+      - audit-data:/app/data
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8081/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ── 3. Secrets Server ──────────────────────────────────────────────────────
+  mcp-secrets-server:
+    <<: *common-build
+    container_name: mcp-secrets-server
+    ports:
+      - "8083:8083"
+    command: uvicorn mcp_secrets_server.main:app --host 0.0.0.0 --port 8083
+    environment:
+      <<: *common-env
+      HOST:                      "0.0.0.0"
+      SECRETS_PORT:              "8083"
+      BASE_URL:                  "http://localhost:8083"
+      DATABASE_URL:              "sqlite+aiosqlite:////app/data/mcp_secrets.db"
+      MASTER_ENCRYPTION_KEY:     "${MASTER_ENCRYPTION_KEY:-dev-key-replace-with-fernet-key-in-production}"
+      SECRETS_ADMIN_KEY:         "${SECRETS_ADMIN_KEY:-dev-secrets-admin-change-in-production}"
+      SECRETS_INGEST_KEY:        "${SECRETS_INGEST_KEY:-dev-secrets-ingest-change-in-production}"
+      DEFAULT_LEASE_TTL_SECONDS: "300"
+      MAX_LEASE_TTL_SECONDS:     "3600"
+      AUDIT_INGEST_KEY:          "${AUDIT_INGEST_API_KEY:-dev-audit-key-change-in-production}"
+      # Optional external backends — leave blank to use local encrypted SQLite
+      VAULT_ADDR:                "${VAULT_ADDR:-}"
+      VAULT_TOKEN:               "${VAULT_TOKEN:-}"
+      AWS_REGION:                "${AWS_REGION:-}"
+      GCP_PROJECT_ID:            "${GCP_PROJECT_ID:-}"
+    volumes:
+      - secrets-data:/app/data
+    depends_on:
+      mcp-audit-server:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8083/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ── 4. PII Filter ──────────────────────────────────────────────────────────
+  mcp-pii-filter:
+    <<: *common-build
+    container_name: mcp-pii-filter
+    ports:
+      - "8084:8084"
+    command: uvicorn mcp_pii_filter.main:app --host 0.0.0.0 --port 8084
+    environment:
+      <<: *common-env
+      HOST:              "0.0.0.0"
+      PII_PORT:          "8084"
+      BASE_URL:          "http://localhost:8084"
+      DATABASE_URL:      "sqlite+aiosqlite:////app/data/mcp_pii.db"
+      PII_ADMIN_KEY:     "${PII_ADMIN_KEY:-dev-pii-admin-change-in-production}"
+      PII_FILTER_KEY:    "${PII_FILTER_KEY:-dev-pii-filter-change-in-production}"
+      DEFAULT_STRATEGY:  "REDACT"
+      AUDIT_INGEST_KEY:  "${AUDIT_INGEST_API_KEY:-dev-audit-key-change-in-production}"
+    volumes:
+      - pii-data:/app/data
+    depends_on:
+      mcp-audit-server:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8084/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ── 5. Gateway ─────────────────────────────────────────────────────────────
+  # Starts last — depends on OAuth, Audit, Secrets, and PII Filter being healthy
+  mcp-gateway:
+    <<: *common-build
+    container_name: mcp-gateway
+    ports:
+      - "8082:8082"
+    command: uvicorn mcp_gateway.main:app --host 0.0.0.0 --port 8082
+    environment:
+      <<: *common-env
+      HOST:                      "0.0.0.0"
+      GATEWAY_PORT:              "8082"
+      BASE_URL:                  "http://localhost:8082"
+      DATABASE_URL:              "sqlite+aiosqlite:////app/data/mcp_gateway.db"
+      GATEWAY_ADMIN_KEY:         "${GATEWAY_ADMIN_KEY:-dev-admin-key-change-in-production}"
+      OAUTH_SERVER_URL:          "http://mcp-oauth-server:8080"
+      OAUTH_CLIENT_ID:           "${GATEWAY_OAUTH_CLIENT_ID:-}"
+      OAUTH_CLIENT_SECRET:       "${GATEWAY_OAUTH_CLIENT_SECRET:-}"
+      AUDIT_SERVER_URL:          "http://mcp-audit-server:8081"
+      AUDIT_INGEST_KEY:          "${AUDIT_INGEST_API_KEY:-dev-audit-key-change-in-production}"
+      DEFAULT_RATE_LIMIT_RPM:    "60"
+      DEFAULT_RATE_LIMIT_RPD:    "10000"
+      BACKEND_TIMEOUT_SECONDS:   "30"
+    volumes:
+      - gateway-data:/app/data
+    depends_on:
+      mcp-oauth-server:
+        condition: service_healthy
+      mcp-audit-server:
+        condition: service_healthy
+      mcp-secrets-server:
+        condition: service_healthy
+      mcp-pii-filter:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8082/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  # ── Test runner (only with --profile test) ─────────────────────────────────
+  test-runner:
+    <<: *common-build
+    container_name: mcp-test-runner
+    profiles: ["test"]
+    command: >
+      sh -c "
+        pip install pytest pytest-asyncio httpx --quiet &&
+        pytest tests/ -v --tb=short
+      "
+    environment:
+      <<: *common-env
+      DATABASE_URL: "sqlite+aiosqlite:////tmp/test.db"
+    depends_on:
+      mcp-gateway:
+        condition: service_healthy
+
+# ── Volumes ────────────────────────────────────────────────────────────────────
+volumes:
+  oauth-data:
+  audit-data:
+  gateway-data:
+  secrets-data:
+  pii-data:
+
+# ── Network ────────────────────────────────────────────────────────────────────
+networks:
+  mcp-net:
+    driver: bridge
