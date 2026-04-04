@@ -92,6 +92,14 @@ print('PII_FILTER_KEY=' + secrets.token_urlsafe(32)); \
 
 # ── Cleanup ───────────────────────────────────────────────────────────────────
 
+register: ## Register a new MCP server: make register SERVER=scripts/servers/payments-server.yaml
+	@if [ -z "$(SERVER)" ]; then echo "Usage: make register SERVER=scripts/servers/your-server.yaml"; exit 1; fi
+	python scripts/register_server.py $(SERVER)
+
+register-dry-run: ## Validate config + check connectivity: make register-dry-run SERVER=...
+	@if [ -z "$(SERVER)" ]; then echo "Usage: make register-dry-run SERVER=scripts/servers/your-server.yaml"; exit 1; fi
+	python scripts/register_server.py $(SERVER) --dry-run
+
 clean: ## Remove containers, volumes, and local .db files
 	docker compose down -v
 	find . -name "*.db" -delete

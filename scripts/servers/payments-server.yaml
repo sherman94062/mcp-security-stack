@@ -1,0 +1,113 @@
+# ═══════════════════════════════════════════════════════════════
+# Server Registration Config
+# Run: python scripts/register_server.py servers/payments-server.yaml
+# ═══════════════════════════════════════════════════════════════
+
+# ── The MCP server being registered ──────────────────────────────
+server:
+  id:           "payments-server"
+  display_name: "Zepz Payments MCP Server"
+  base_url:     "http://payments-mcp:9000"      # Internal Docker/k8s URL
+  health_url:   "http://payments-mcp:9000/health"
+  description:  "Handles cross-border payment tool calls for WorldRemit and Sendwave"
+
+# ── Secrets this server needs at runtime ─────────────────────────
+# These are stored (encrypted) in the Secrets Server.
+# The MCP server requests leases at runtime — never hardcodes these.
+secrets:
+  - name:        "payments/stripe-api-key"
+    description: "Stripe live API key for card processing"
+    backend:     "local"                         # local | vault | aws | gcp
+    value_env:   "STRIPE_API_KEY"                # Read from local env at registration time
+    tags:        "payments,stripe,prod"
+
+  - name:        "payments/trm-api-key"
+    description: "TRM Labs blockchain intelligence API key"
+    backend:     "local"
+    value_env:   "TRM_API_KEY"
+    tags:        "payments,compliance,trm"
+
+  - name:        "payments/fireblocks-api-key"
+    description: "Fireblocks treasury/settlement API key"
+    backend:     "local"
+    value_env:   "FIREBLOCKS_API_KEY"
+    tags:        "payments,fireblocks,stablecoin"
+
+# ── Agent clients that call this server ──────────────────────────
+# Each agent gets an OAuth client + gateway policy + secret access.
+agents:
+  - id:          "aml-agent"
+    name:        "AML Transaction Monitor"
+    is_public:   false
+    # Tools this agent is allowed to call on this server
+    allowed_tools:
+      - "check_transaction"
+      - "get_risk_score"
+      - "flag_transaction"
+    rate_limit_rpm: 30
+    rate_limit_rpd: 5000
+    # Secrets this agent can lease
+    secret_patterns:
+      - "payments/trm-api-key"
+    max_lease_ttl: 300
+    notes: "Read-only AML compliance agent — no fund movement tools"
+
+  - id:          "fx-pricing-agent"
+    name:        "FX Pricing Agent"
+    is_public:   false
+    allowed_tools:
+      - "get_exchange_rate"
+      - "get_corridor_pricing"
+      - "estimate_fee"
+    rate_limit_rpm: 120
+    rate_limit_rpd: 50000
+    secret_patterns:
+      - "payments/stripe-api-key"
+    max_lease_ttl: 600
+    notes: "High-frequency FX rate agent — read-only pricing tools"
+
+  - id:          "transfer-agent"
+    name:        "Transfer Execution Agent"
+    is_public:   false
+    allowed_tools:
+      - "initiate_transfer"
+      - "get_transfer_status"
+      - "cancel_transfer"
+    rate_limit_rpm: 10
+    rate_limit_rpd: 1000
+    secret_patterns:
+      - "payments/stripe-api-key"
+      - "payments/fireblocks-api-key"
+    max_lease_ttl: 120
+    notes: "Transfer execution — strict rate limits, human approval required above $10k"
+
+# ── PII filter rules for this server ─────────────────────────────
+pii_rules:
+  # Default rule for all tools on this server
+  - target:     "payments-server"
+    direction:  "both"
+    strategy:   "MASK"
+    action:     "REDACT"
+    notes:      "Mask PII in all payments tool I/O"
+
+  # Stricter rule: BLOCK if credit card appears in transfer input
+  - target:     "payments-server/initiate_transfer"
+    direction:  "input"
+    enabled_types:
+      - "CREDIT_CARD"
+      - "SSN"
+    strategy:   "REDACT"
+    action:     "BLOCK"
+    notes:      "Never accept raw card/SSN in transfer payload — must be tokenised upstream"
+
+  # Allowlist wallet addresses on stablecoin tools — they're not PII here
+  - target:     "payments-server/initiate_transfer"
+    direction:  "input"
+    field_allowlist:
+      - "sender_wallet"
+      - "recipient_wallet"
+      - "transaction_id"
+      - "corridor"
+      - "amount"
+      - "currency"
+    notes:      "Wallet addresses and transaction metadata are not PII for this tool"

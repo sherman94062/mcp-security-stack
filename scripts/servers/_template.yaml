@@ -1,0 +1,48 @@
+# ═══════════════════════════════════════════════════════════════
+# MCP Server Registration Template
+# Copy this file, fill in your values, then run:
+#   python scripts/register_server.py scripts/servers/my-server.yaml
+# ═══════════════════════════════════════════════════════════════
+
+server:
+  id:           "my-server"                        # Lowercase, hyphens only
+  display_name: "My MCP Server"
+  base_url:     "http://my-server:9000"            # Internal URL the Gateway proxies to
+  health_url:   "http://my-server:9000/health"     # Optional health probe URL
+  description:  "What this server does"
+
+# Secrets this server needs at runtime.
+# Set the env var before running register_server.py:
+#   export MY_API_KEY=sk-live-abc123
+# Leave secrets empty [] if this server needs no external credentials.
+secrets:
+  - name:        "my-server/api-key"               # Namespaced: server-id/key-name
+    description: "Primary API key for my-server"
+    backend:     "local"                           # local | vault | aws | gcp
+    value_env:   "MY_API_KEY"                      # Env var that holds the actual value
+    tags:        "my-server,prod"
+
+# Agents that call this server.
+# Each agent gets: OAuth client, Gateway policy, Secrets access policy.
+agents:
+  - id:          "my-agent"
+    name:        "My Agent"
+    is_public:   false
+    allowed_tools:
+      - "my_tool_one"
+      - "my_tool_two"
+    rate_limit_rpm: 60
+    rate_limit_rpd: 10000
+    secret_patterns:
+      - "my-server/api-key"
+    max_lease_ttl: 300
+    notes:        "What this agent does and why it has these permissions"
+
+# PII filter rules for this server's tools.
+# Remove this section if your server handles no PII.
+pii_rules:
+  - target:    "my-server"                        # server_id, or server_id/tool_name
+    direction: "both"                             # input | output | both
+    strategy:  "REDACT"                           # REDACT | MASK | HASH | FLAG
+    action:    "REDACT"                           # REDACT | BLOCK | FLAG
+    notes:     "Default PII rule for all tools"
